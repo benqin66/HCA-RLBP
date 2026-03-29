@@ -194,11 +194,6 @@ import torch.nn.functional as F
 
 class HierarchicalCrossAttention(nn.Module):
     """
-    层次化交叉注意力融合模块 (Hierarchical Cross-Attention Fusion Module)
-
-    该模块分两阶段融合三种模态的特征：
-    阶段一（序列内融合）: 使用局部序列特征 H_l 作为 Query，与全局序列特征 H_g 进行注意力交互，得到增强的序列特征 H_seq。
-    阶段二（序列-结构交叉模态融合）: 使用 H_seq 作为 Query，与结构特征 H_struct 进行交叉注意力交互，得到最终融合特征 Z_final。
 
     Args:
         d_seq (int): 序列特征（H_l, H_g）的输入维度，也是结构特征投影后的维度（d_seq）。
@@ -214,27 +209,21 @@ class HierarchicalCrossAttention(nn.Module):
         self.head_dim = d_seq // num_heads
         assert self.head_dim * num_heads == d_seq, "d_seq 必须能被 num_heads 整除"
 
-        # --- 第一阶段参数: 序列内融合 ---
-        # 论文描述: H_seq = Softmax( (H_l W1^Q)(H_g W1^K)^T / sqrt(d_k) ) (H_g W1^V)
         # 实现为多头注意力
         self.W1_Q = nn.Linear(d_seq, d_seq)  # 对应 W1^Q
         self.W1_K = nn.Linear(d_seq, d_seq)  # 对应 W1^K
         self.W1_V = nn.Linear(d_seq, d_seq)  # 对应 W1^V
         self.attn_dropout1 = nn.Dropout(dropout)
 
-        # --- 结构特征投影层  ---
         # 论文描述: H_struct = H_s W_proj + b_proj,  H_struct ∈ R^{L x d_seq}
         # 此操作在融合前进行，将结构特征维度与序列特征对齐。
         self.struct_proj = nn.Linear(d_struct, d_seq)  # 对应 W_proj, b_proj
 
-        # --- 第二阶段参数: 序列-结构交叉模态融合 ---
-        # 论文描述: Z_final = Softmax( (H_seq W2^Q)(H_struct W2^K)^T / sqrt(d_k) ) (H_struct W2^V)
         self.W2_Q = nn.Linear(d_seq, d_seq)  # 对应 W2^Q
         self.W2_K = nn.Linear(d_seq, d_seq)  # 对应 W2^K
         self.W2_V = nn.Linear(d_seq, d_seq)  # 对应 W2^V
         self.attn_dropout2 = nn.Dropout(dropout)
 
-        # 可选的输出层
         self.output_proj = nn.Linear(d_seq, d_seq)
         self.output_dropout = nn.Dropout(dropout)
         self.layer_norm1 = nn.LayerNorm(d_seq)
@@ -255,13 +244,9 @@ class HierarchicalCrossAttention(nn.Module):
         """
         batch_size, L, _ = H_l.shape
 
-        # 1. 投影结构特征以对齐维度 (公式5)
         # H_struct: (batch_size, L, d_struct) -> (batch_size, L, d_seq)
         H_struct = self.struct_proj(H_s)
 
-        # ===== 第一阶段: 序列内融合 (Local-Global Sequence Fusion) =====
-        # 输入: Query=H_l, Key=H_g, Value=H_g
-        # 目标: 让局部特征从全局上下文中筛选最相关的信息
         Q1 = self.W1_Q(H_l).view(batch_size, L, self.num_heads, self.head_dim).transpose(1, 2)
         K1 = self.W1_K(H_g).view(batch_size, L, self.num_heads, self.head_dim).transpose(1, 2)
         V1 = self.W1_V(H_g).view(batch_size, L, self.num_heads, self.head_dim).transpose(1, 2)
@@ -275,12 +260,7 @@ class HierarchicalCrossAttention(nn.Module):
         context1 = torch.matmul(attn_weights1, V1)  # (batch_size, num_heads, L, head_dim)
         context1 = context1.transpose(1, 2).contiguous().view(batch_size, L, self.d_seq)
 
-        # 残差连接与层归一化 (论文未明确，为标准Transformer设计，建议保留以稳定训练)
         H_seq = self.layer_norm1(H_l + context1)  # 输出: 增强的序列特征 H_seq
-
-        # ===== 第二阶段: 序列-结构交叉模态融合 (Sequence-Structure Cross-Modal Fusion) =====
-        # 输入: Query=H_seq, Key=H_struct, Value=H_struct
-        # 目标: 让增强后的序列特征去查询并融合最关键的结构环境信息
         Q2 = self.W2_Q(H_seq).view(batch_size, L, self.num_heads, self.head_dim).transpose(1, 2)
         K2 = self.W2_K(H_struct).view(batch_size, L, self.num_heads, self.head_dim).transpose(1, 2)
         V2 = self.W2_V(H_struct).view(batch_size, L, self.num_heads, self.head_dim).transpose(1, 2)
@@ -295,7 +275,6 @@ class HierarchicalCrossAttention(nn.Module):
         # 残差连接与层归一化
         Z_final = self.layer_norm2(H_seq + context2)
 
-        # 可选的最终投影与Dropout
         Z_final = self.output_dropout(F.relu(self.output_proj(Z_final)))
 
         return Z_final
@@ -323,7 +302,7 @@ def bilinear_interpolate(feature_map, sample_points):
     feature_map_2d = feature_map.unsqueeze(2)  # (batch, channels, 1, length)
 
     batch, channels, out_len, kernel_size = sample_points.shape[0], feature_map.size(1), sample_points.size(2), sample_points.size(3)
-    sample_points = sample_points.squeeze(1)  # 移除为grid_sample添加的维度，回到 (batch, out_len, kernel_size)
+    sample_points = sample_points.squeeze(1)  
 
     # 获取采样点坐标的整数部分和小数部分
     x = sample_points
